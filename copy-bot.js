@@ -122,31 +122,45 @@ function fmtNum(n) {
   return Number(n).toLocaleString("en-US", { maximumFractionDigits: 6 });
 }
 
-function shortAddr(addr) {
-  return addr.slice(0, 6) + "..." + addr.slice(-4);
+
+const SL_PCT  = 0.02; // 2% stop loss
+const TP1_PCT = 0.02; // TP1 at 1:1
+const TP2_PCT = 0.04; // TP2 at 2:1
+const TP3_PCT = 0.06; // TP3 at 3:1
+
+function calcLevels(entry, side) {
+  const dir = side === "LONG" ? 1 : -1;
+  return {
+    sl:  entry * (1 - dir * SL_PCT),
+    tp1: entry * (1 + dir * TP1_PCT),
+    tp2: entry * (1 + dir * TP2_PCT),
+    tp3: entry * (1 + dir * TP3_PCT),
+  };
 }
 
-function renderOpen(coin, side, entry, lev, traderAddr) {
+function renderOpen(coin, side, entry, lev) {
   const long = side === "LONG";
+  const { sl, tp1, tp2, tp3 } = calcLevels(entry, side);
   return [
     `${long ? "🟢" : "🔴"} <b>${side} $${coin}</b>${lev ? `   ⚡${lev}x` : ""}`,
     "",
     `Entry: <b>${fmtNum(entry)}</b>`,
-    `🎯 TP/SL: manage your own risk`,
+    `🎯 TP1: ${fmtNum(tp1)}`,
+    `🎯 TP2: ${fmtNum(tp2)}`,
+    `🎯 TP3: ${fmtNum(tp3)}`,
+    `🛑 SL: ${fmtNum(sl)}`,
     "",
-    `👤 Copied from: <code>${shortAddr(traderAddr)}</code>`,
-    `#${coin} #copytrade`,
+    `#${coin}`,
   ].join("\n");
 }
 
-function renderClose(coin, side, entry, exitPrice, traderAddr) {
+function renderClose(coin, side, entry, exitPrice) {
   const move = exitPrice
     ? ((exitPrice - entry) / entry) * 100 * (side === "LONG" ? 1 : -1)
     : null;
   return [
     `⚪️ <b>$${coin} ${side} closed</b>`,
     move !== null ? `${move >= 0 ? "+" : ""}${move.toFixed(2)}% from entry` : "Position closed",
-    `👤 Trader: <code>${shortAddr(traderAddr)}</code>`,
   ].join("\n");
 }
 
@@ -179,7 +193,7 @@ async function checkTrader(address) {
       // brand new position
       const posted = await tg("sendMessage", {
         chat_id: CHANNEL_ID,
-        text: renderOpen(coin, pos.side, pos.entry, pos.lev, address),
+        text: renderOpen(coin, pos.side, pos.entry, pos.lev),
         parse_mode: "HTML",
       });
       if (!state.positions[address]) state.positions[address] = {};
@@ -191,10 +205,10 @@ async function checkTrader(address) {
       console.log(`Opened: ${shortAddr(address)} ${pos.side} ${coin} @ ${pos.entry}`);
     } else if (old.side !== pos.side) {
       // direction flipped — close old, open new
-      await postClose(address, coin, old, pos.entry);
+      await postClose(coin, old, pos.entry);
       const posted = await tg("sendMessage", {
         chat_id: CHANNEL_ID,
-        text: renderOpen(coin, pos.side, pos.entry, pos.lev, address),
+        text: renderOpen(coin, pos.side, pos.entry, pos.lev),
         parse_mode: "HTML",
       });
       state.positions[address][coin] = {
@@ -212,7 +226,7 @@ async function checkTrader(address) {
   // Detect closed positions
   for (const [coin, old] of Object.entries(prev)) {
     if (!current[coin]) {
-      await postClose(address, coin, old, null);
+      await postClose(coin, old, null);
       delete state.positions[address][coin];
       console.log(`Closed: ${shortAddr(address)} ${old.side} ${coin}`);
     }
@@ -221,8 +235,8 @@ async function checkTrader(address) {
   saveState();
 }
 
-async function postClose(address, coin, old, exitPrice) {
-  const text = renderClose(coin, old.side, old.entry, exitPrice, address);
+async function postClose(coin, old, exitPrice) {
+  const text = renderClose(coin, old.side, old.entry, exitPrice);
   if (old.messageId) {
     await tg("sendMessage", {
       chat_id: CHANNEL_ID,
