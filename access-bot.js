@@ -34,6 +34,7 @@ const JSONBIN_KEY = process.env.JSONBIN_KEY;
 const JSONBIN_BIN_ID = process.env.JSONBIN_BIN_ID;
 const PORT = process.env.PORT || 3000;
 
+console.log("Env keys present:", Object.keys(process.env).filter(k => ["TELEGRAM_BOT_TOKEN","CHANNEL_ID","ADMIN_IDS","NOWPAYMENTS_API_KEY","NOWPAYMENTS_IPN_SECRET","PUBLIC_URL","JSONBIN_KEY","JSONBIN_BIN_ID"].includes(k)));
 for (const [k, v] of Object.entries({ TELEGRAM_BOT_TOKEN: BOT_TOKEN, CHANNEL_ID, NOWPAYMENTS_API_KEY: NP_API_KEY, NOWPAYMENTS_IPN_SECRET: NP_IPN_SECRET, PUBLIC_URL })) {
   if (!v) { console.error("Missing env:", k); process.exit(1); }
 }
