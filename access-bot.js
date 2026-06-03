@@ -34,7 +34,7 @@ const JSONBIN_KEY = process.env.JSONBIN_KEY;
 const JSONBIN_BIN_ID = process.env.JSONBIN_BIN_ID;
 const PORT = process.env.PORT || 3000;
 
-for (const [k, v] of Object.entries({ BOT_TOKEN, CHANNEL_ID, NP_API_KEY, NP_IPN_SECRET, PUBLIC_URL })) {
+for (const [k, v] of Object.entries({ TELEGRAM_BOT_TOKEN: BOT_TOKEN, CHANNEL_ID, NOWPAYMENTS_API_KEY: NP_API_KEY, NOWPAYMENTS_IPN_SECRET: NP_IPN_SECRET, PUBLIC_URL })) {
   if (!v) { console.error("Missing env:", k); process.exit(1); }
 }
 
