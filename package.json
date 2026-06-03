@@ -1,0 +1,12 @@
+{
+  "name": "goat-bots",
+  "version": "1.0.0",
+  "description": "Goat Gate (crypto access) + Goat Signals (trade signals) — paid Telegram channel",
+  "scripts": {
+    "access": "node access-bot.js",
+    "signals": "node signal-bot.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
