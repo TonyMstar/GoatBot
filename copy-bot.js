@@ -112,16 +112,16 @@ function calcLevels(entry, side) {
   };
 }
 
-function renderSignal(coin, side, entry, lev, whaleCount) {
+function renderSignal(coin, side, entry, lev, whaleCount, hits = []) {
   const long = side === "LONG";
   const { sl, tps } = calcLevels(entry, side);
   return [
     `${long ? "🟢" : "🔴"} <b>${side} $${coin}</b>${lev ? `   ⚡${lev}x` : ""}`,
     "",
     `Entry: <b>${fmtNum(entry)}</b>`,
-    `🎯 TP1: ${fmtNum(tps[0])}`,
-    `🎯 TP2: ${fmtNum(tps[1])}`,
-    `🎯 TP3: ${fmtNum(tps[2])}`,
+    `${hits.includes(1) ? "✅" : "🎯"} TP1: ${fmtNum(tps[0])}${hits.includes(1) ? "  ✓" : ""}`,
+    `${hits.includes(2) ? "✅" : "🎯"} TP2: ${fmtNum(tps[1])}${hits.includes(2) ? "  ✓" : ""}`,
+    `${hits.includes(3) ? "✅" : "🎯"} TP3: ${fmtNum(tps[2])}${hits.includes(3) ? "  ✓" : ""}`,
     `🛑 SL: ${fmtNum(sl)}`,
     "",
     `🐋 ${whaleCount} whale${whaleCount > 1 ? "s" : ""} aligned`,
@@ -162,6 +162,67 @@ function medianLev(levs) {
   if (!levs.length) return null;
   const sorted = [...levs].sort((a, b) => a - b);
   return sorted[Math.floor(sorted.length / 2)];
+}
+
+// ---------- TP/SL price checker ----------
+function getMids() {
+  return hl({ type: "allMids" });
+}
+
+async function checkTpSl(mids) {
+  for (const [coin, sig] of Object.entries(state.signals)) {
+    const price = parseFloat(mids[coin]);
+    if (!price || !sig.messageId) continue;
+
+    const { sl, tps } = calcLevels(sig.entry, sig.side);
+    const long = sig.side === "LONG";
+    if (!sig.hits) sig.hits = [];
+    let changed = false;
+
+    for (let i = 0; i < tps.length; i++) {
+      const tpNum = i + 1;
+      if (sig.hits.includes(tpNum)) continue;
+      const hit = long ? price >= tps[i] : price <= tps[i];
+      if (!hit) continue;
+
+      sig.hits.push(tpNum);
+      changed = true;
+      const move = ((tps[i] - sig.entry) / sig.entry) * 100 * (long ? 1 : -1);
+
+      await tg("editMessageText", {
+        chat_id: CHANNEL_ID,
+        message_id: sig.messageId,
+        text: renderSignal(coin, sig.side, sig.entry, sig.lev, sig.whaleCount, sig.hits),
+        parse_mode: "HTML",
+      });
+      await tg("sendMessage", {
+        chat_id: CHANNEL_ID,
+        reply_to_message_id: sig.messageId,
+        text: `✅ <b>TP${tpNum} HIT</b> — $${coin} ${sig.side}\n+${move.toFixed(2)}% from entry${sig.lev ? ` (${sig.lev}x)` : ""} 🎉`,
+        parse_mode: "HTML",
+      });
+      console.log(`TP${tpNum} hit: ${sig.side} ${coin} @ ${price}`);
+    }
+
+    if (!sig.slHit) {
+      const slHit = long ? price <= sl : price >= sl;
+      if (slHit) {
+        sig.slHit = true;
+        changed = true;
+        const move = ((sl - sig.entry) / sig.entry) * 100 * (long ? 1 : -1);
+        await tg("sendMessage", {
+          chat_id: CHANNEL_ID,
+          reply_to_message_id: sig.messageId,
+          text: `🛑 <b>SL HIT</b> — $${coin} ${sig.side}\n${move.toFixed(2)}% — risk managed, on to the next.`,
+          parse_mode: "HTML",
+        });
+        await closeSignal(coin, sig, price);
+        console.log(`SL hit: ${sig.side} ${coin} @ ${price}`);
+      }
+    }
+
+    if (changed) saveState();
+  }
 }
 
 // ---------- main poll ----------
@@ -221,6 +282,7 @@ async function poll() {
             side: dominant, entry, lev,
             messageId: posted && posted.ok ? posted.result.message_id : null,
             whaleCount: domCount,
+            hits: [],
           };
           console.log(`Signal opened: ${dominant} ${coin} (${domCount} whales)`);
         }
@@ -246,12 +308,17 @@ async function poll() {
             side: opposite, entry, lev,
             messageId: posted && posted.ok ? posted.result.message_id : null,
             whaleCount: oppCount,
+            hits: [],
           };
           console.log(`Signal flipped: ${opposite} ${coin} (${oppCount} whales)`);
         }
         // otherwise keep signal open — minor fluctuations are ignored
       }
     }
+
+    // 4. Check TP/SL levels against live prices
+    const mids = await getMids();
+    if (mids) await checkTpSl(mids);
 
     saveState();
   } catch (e) {
