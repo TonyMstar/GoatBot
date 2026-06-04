@@ -6,13 +6,13 @@
 
 const https = require("node:https");
 
-const MIN_WIN_RATE       = 50;   // minimum trade win rate %
+const MIN_WIN_RATE       = 65;   // minimum trade win rate %
 const MAX_WIN_RATE       = 98;   // above this = likely wash trader / arb bot
 const MAX_TRADES_30D     = 1000; // above this = likely bot/market maker
 const MIN_TRADES_30D     = 10;   // below this = not enough data
-const MIN_PNL_30D        = 10000; // minimum $10k profit in 30 days
+const MIN_PNL_30D        = 5000; // minimum $5k profit in 30 days
 const MIN_ACTIVE_DAYS    = 10;   // must trade on at least 10 distinct days in 30
-const TOP_N              = 100;  // how many leaderboard traders to scan
+const TOP_N              = 200;  // how many leaderboard traders to scan
 
 const THIRTY_DAYS_AGO = Date.now() - 30 * 24 * 60 * 60 * 1000;
 

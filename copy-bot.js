@@ -120,7 +120,7 @@ function renderSignal(coin, side, entry, lev, whaleCount, hits = []) {
   const long = side === "LONG";
   const { sl, tps } = calcLevels(entry, side);
   return [
-    `${long ? "🟢" : "🔴"} <b>${side} $${coin}</b>${lev ? `   ⚡${lev}x` : ""}`,
+    `🐐 <b>${side} $${coin}</b>${lev ? `  ⚡${lev}x` : ""}`,
     "",
     `Entry: <b>${fmtNum(entry)}</b>`,
     `${hits.includes(1) ? "✅" : "🎯"} TP1: ${fmtNum(tps[0])}${hits.includes(1) ? "  ✓" : ""}`,
@@ -128,8 +128,7 @@ function renderSignal(coin, side, entry, lev, whaleCount, hits = []) {
     `${hits.includes(3) ? "✅" : "🎯"} TP3: ${fmtNum(tps[2])}${hits.includes(3) ? "  ✓" : ""}`,
     `🛑 SL: ${fmtNum(sl)}`,
     "",
-    `🐋 ${whaleCount} whale${whaleCount > 1 ? "s" : ""} aligned`,
-    `#${coin}`,
+    `🔐 Goat Verified | #${coin}`,
   ].join("\n");
 }
 
