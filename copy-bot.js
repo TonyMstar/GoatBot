@@ -1,36 +1,45 @@
 /**
- * Copy Machine — auto-mirrors top Hyperliquid trader positions to Telegram channel
+ * Copy Machine v2 — consensus-based whale signal detector
  * --------------------------------------------------
- * Polls each tracked wallet on Hyperliquid every minute. When a new position
- * opens → posts a formatted signal card. When it closes → posts the result.
+ * Monitors top Hyperliquid wallets. Only posts a signal when CONSENSUS_MIN
+ * or more whales are in the same direction on the same asset. One active
+ * signal per asset. Closes automatically when consensus flips or drops.
  *
  * Env vars:
- *   TELEGRAM_BOT_TOKEN   - bot token (can reuse Goat Signals token)
- *   CHANNEL_ID           - private channel id (-100...)
+ *   TELEGRAM_BOT_TOKEN   - bot token
+ *   CHANNEL_ID           - private channel id
  *   TRADER_ADDRESSES     - comma-separated HL wallet addresses to monitor
- *   TOP_TRADERS_COUNT    - how many leaderboard traders to auto-fetch (default 5)
- *   JSONBIN_KEY          - X-Master-Key for JSONBin (optional — for state persistence)
- *   JSONBIN_BIN_ID       - separate bin id for copy bot state
- *   POLL_INTERVAL        - poll interval ms (default 60000)
+ *   CONSENSUS_MIN        - how many whales must agree to post (default 2)
+ *   MIN_POSITION_USD     - ignore positions smaller than this (default 100000)
+ *   JSONBIN_KEY          - X-Master-Key for JSONBin
+ *   JSONBIN_BIN_ID       - bin id for copy bot state
+ *   POLL_INTERVAL        - ms between polls (default 60000)
  */
 
 const https = require("node:https");
-const crypto = require("node:crypto");
 
-const BOT_TOKEN     = process.env.TELEGRAM_BOT_TOKEN;
-const CHANNEL_ID    = process.env.CHANNEL_ID;
-const JSONBIN_KEY   = process.env.JSONBIN_KEY;
+const BOT_TOKEN      = process.env.TELEGRAM_BOT_TOKEN;
+const CHANNEL_ID     = process.env.CHANNEL_ID;
+const JSONBIN_KEY    = process.env.JSONBIN_KEY;
 const JSONBIN_BIN_ID = process.env.JSONBIN_BIN_ID;
-const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "60000");
-const TOP_N         = parseInt(process.env.TOP_TRADERS_COUNT || "5");
-const MANUAL_TRADERS = (process.env.TRADER_ADDRESSES || "").split(",").map(s => s.trim()).filter(Boolean);
+const POLL_INTERVAL  = parseInt(process.env.POLL_INTERVAL    || "60000");
+const CONSENSUS_MIN  = parseInt(process.env.CONSENSUS_MIN    || "2");
+const MIN_POS_USD    = parseFloat(process.env.MIN_POSITION_USD || "100000");
+const TRADERS        = (process.env.TRADER_ADDRESSES || "").split(",").map(s => s.trim()).filter(Boolean);
+
+const SL_PCT  = 0.02;
+const TP_PCTS = [0.02, 0.04, 0.06];
 
 if (!BOT_TOKEN || !CHANNEL_ID) {
   console.error("Need TELEGRAM_BOT_TOKEN and CHANNEL_ID");
   process.exit(1);
 }
+if (TRADERS.length === 0) {
+  console.error("Need TRADER_ADDRESSES");
+  process.exit(1);
+}
 
-// ---------- HTTP helpers ----------
+// ---------- HTTP ----------
 function request(opts, payload) {
   return new Promise((resolve) => {
     const req = https.request(opts, (res) => {
@@ -73,14 +82,15 @@ function jsonbin(method, path, body) {
 }
 
 // ---------- state ----------
-// positions: { [traderAddr]: { [coin]: { side, entry, size, lev, messageId, openedAt } } }
-let state = { positions: {}, traders: [] };
+// positions: { [addr]: { [coin]: { side, entry, valueUsd } } }
+// signals:   { [coin]: { side, entry, lev, messageId, whaleCount } }
+let state = { positions: {}, signals: {} };
 
 async function loadState() {
   const r = await jsonbin("GET", `/v3/b/${JSONBIN_BIN_ID}/latest`);
   if (r && r.record) state = r.record;
   state.positions = state.positions || {};
-  state.traders   = state.traders   || [];
+  state.signals   = state.signals   || {};
 }
 
 let saveTimer = null;
@@ -89,67 +99,32 @@ function saveState() {
   saveTimer = setTimeout(() => jsonbin("PUT", `/v3/b/${JSONBIN_BIN_ID}`, state), 300);
 }
 
-// ---------- leaderboard ----------
-async function fetchTopTraders() {
-  if (MANUAL_TRADERS.length > 0) {
-    console.log("Using manual trader list:", MANUAL_TRADERS.length);
-    return MANUAL_TRADERS;
-  }
-
-  const res = await hl({ type: "leaderboard", window: "allTime" });
-  if (res && Array.isArray(res)) {
-    const addrs = res
-      .slice(0, TOP_N)
-      .map(t => t.ethAddress || t.user || t.address)
-      .filter(a => a && a.startsWith("0x"));
-    if (addrs.length > 0) {
-      console.log("Fetched top traders from leaderboard:", addrs.length);
-      return addrs;
-    }
-  }
-
-  if (state.traders.length > 0) {
-    console.log("Using cached trader list:", state.traders.length);
-    return state.traders;
-  }
-
-  console.warn("No traders found. Set TRADER_ADDRESSES env var with comma-separated HL wallet addresses.");
-  return [];
-}
-
 // ---------- formatting ----------
 function fmtNum(n) {
-  return Number(n).toLocaleString("en-US", { maximumFractionDigits: 6 });
+  return Number(n).toLocaleString("en-US", { maximumFractionDigits: 4 });
 }
-
-
-const SL_PCT  = 0.02; // 2% stop loss
-const TP1_PCT = 0.02; // TP1 at 1:1
-const TP2_PCT = 0.04; // TP2 at 2:1
-const TP3_PCT = 0.06; // TP3 at 3:1
 
 function calcLevels(entry, side) {
   const dir = side === "LONG" ? 1 : -1;
   return {
     sl:  entry * (1 - dir * SL_PCT),
-    tp1: entry * (1 + dir * TP1_PCT),
-    tp2: entry * (1 + dir * TP2_PCT),
-    tp3: entry * (1 + dir * TP3_PCT),
+    tps: TP_PCTS.map(p => entry * (1 + dir * p)),
   };
 }
 
-function renderOpen(coin, side, entry, lev) {
+function renderSignal(coin, side, entry, lev, whaleCount) {
   const long = side === "LONG";
-  const { sl, tp1, tp2, tp3 } = calcLevels(entry, side);
+  const { sl, tps } = calcLevels(entry, side);
   return [
     `${long ? "🟢" : "🔴"} <b>${side} $${coin}</b>${lev ? `   ⚡${lev}x` : ""}`,
     "",
     `Entry: <b>${fmtNum(entry)}</b>`,
-    `🎯 TP1: ${fmtNum(tp1)}`,
-    `🎯 TP2: ${fmtNum(tp2)}`,
-    `🎯 TP3: ${fmtNum(tp3)}`,
+    `🎯 TP1: ${fmtNum(tps[0])}`,
+    `🎯 TP2: ${fmtNum(tps[1])}`,
+    `🎯 TP3: ${fmtNum(tps[2])}`,
     `🛑 SL: ${fmtNum(sl)}`,
     "",
+    `🐋 ${whaleCount} whale${whaleCount > 1 ? "s" : ""} aligned`,
     `#${coin}`,
   ].join("\n");
 }
@@ -160,119 +135,150 @@ function renderClose(coin, side, entry, exitPrice) {
     : null;
   return [
     `⚪️ <b>$${coin} ${side} closed</b>`,
-    move !== null ? `${move >= 0 ? "+" : ""}${move.toFixed(2)}% from entry` : "Position closed",
+    move !== null ? `${move >= 0 ? "+" : ""}${move.toFixed(2)}% from entry` : "Whales exited",
   ].join("\n");
 }
 
-// ---------- position checking ----------
-async function checkTrader(address) {
-  const res = await hl({ type: "clearinghouseState", user: address });
-  if (!res || !Array.isArray(res.assetPositions)) return;
-
-  const current = {};
-  for (const ap of res.assetPositions) {
-    const pos = ap.position;
-    if (!pos || !pos.coin || !pos.szi) continue;
-    const size = parseFloat(pos.szi);
-    if (Math.abs(size) < 1e-8) continue;
-
-    current[pos.coin] = {
-      side:  size > 0 ? "LONG" : "SHORT",
-      entry: parseFloat(pos.entryPx),
-      size:  Math.abs(size),
-      lev:   pos.leverage ? pos.leverage.value : null,
-    };
-  }
-
-  const prev = state.positions[address] || {};
-
-  // Detect new / flipped positions
-  for (const [coin, pos] of Object.entries(current)) {
-    const old = prev[coin];
-    if (!old) {
-      // brand new position
-      const posted = await tg("sendMessage", {
-        chat_id: CHANNEL_ID,
-        text: renderOpen(coin, pos.side, pos.entry, pos.lev),
-        parse_mode: "HTML",
-      });
-      if (!state.positions[address]) state.positions[address] = {};
-      state.positions[address][coin] = {
-        ...pos,
-        messageId: posted && posted.ok ? posted.result.message_id : null,
-        openedAt: Date.now(),
-      };
-      console.log(`Opened: ${shortAddr(address)} ${pos.side} ${coin} @ ${pos.entry}`);
-    } else if (old.side !== pos.side) {
-      // direction flipped — close old, open new
-      await postClose(coin, old, pos.entry);
-      const posted = await tg("sendMessage", {
-        chat_id: CHANNEL_ID,
-        text: renderOpen(coin, pos.side, pos.entry, pos.lev),
-        parse_mode: "HTML",
-      });
-      state.positions[address][coin] = {
-        ...pos,
-        messageId: posted && posted.ok ? posted.result.message_id : null,
-        openedAt: Date.now(),
-      };
-    }
-    // size-only changes (adding to position) are silently updated
-    if (state.positions[address] && state.positions[address][coin]) {
-      state.positions[address][coin].size = pos.size;
+// ---------- consensus ----------
+function buildConsensus() {
+  // consensus[coin] = { LONG: count, SHORT: count, levSum: number, entries: [] }
+  const consensus = {};
+  for (const [, coinMap] of Object.entries(state.positions)) {
+    for (const [coin, pos] of Object.entries(coinMap)) {
+      if (!consensus[coin]) consensus[coin] = { LONG: 0, SHORT: 0, levs: [], entries: [] };
+      consensus[coin][pos.side]++;
+      if (pos.lev)   consensus[coin].levs.push(pos.lev);
+      consensus[coin].entries.push(pos.entry);
     }
   }
-
-  // Detect closed positions
-  for (const [coin, old] of Object.entries(prev)) {
-    if (!current[coin]) {
-      await postClose(coin, old, null);
-      delete state.positions[address][coin];
-      console.log(`Closed: ${shortAddr(address)} ${old.side} ${coin}`);
-    }
-  }
-
-  saveState();
+  return consensus;
 }
 
-async function postClose(coin, old, exitPrice) {
-  const text = renderClose(coin, old.side, old.entry, exitPrice);
-  if (old.messageId) {
+function avgEntry(entries) {
+  return entries.reduce((a, b) => a + b, 0) / entries.length;
+}
+
+function medianLev(levs) {
+  if (!levs.length) return null;
+  const sorted = [...levs].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+// ---------- main poll ----------
+async function poll() {
+  try {
+    // 1. Fetch positions for each trader
+    for (const addr of TRADERS) {
+      const res = await hl({ type: "clearinghouseState", user: addr });
+      if (!res || !Array.isArray(res.assetPositions)) continue;
+
+      const coinMap = {};
+      for (const ap of res.assetPositions) {
+        const pos = ap.position;
+        if (!pos || !pos.coin || !pos.szi) continue;
+        const size = parseFloat(pos.szi);
+        if (Math.abs(size) < 1e-8) continue;
+        const valueUsd = parseFloat(pos.positionValue || "0");
+        if (valueUsd < MIN_POS_USD) continue; // ignore small positions
+
+        coinMap[pos.coin] = {
+          side:     size > 0 ? "LONG" : "SHORT",
+          entry:    parseFloat(pos.entryPx),
+          valueUsd,
+          lev:      pos.leverage ? pos.leverage.value : null,
+        };
+      }
+      state.positions[addr] = coinMap;
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    // 2. Build consensus map
+    const consensus = buildConsensus();
+
+    // 3. Check each coin for signal open/close
+    const allCoins = new Set([
+      ...Object.keys(consensus),
+      ...Object.keys(state.signals),
+    ]);
+
+    for (const coin of allCoins) {
+      const counts    = consensus[coin] || { LONG: 0, SHORT: 0, levs: [], entries: [] };
+      const dominant  = counts.LONG >= counts.SHORT ? "LONG" : "SHORT";
+      const domCount  = counts[dominant];
+      const activeSig = state.signals[coin];
+
+      if (!activeSig) {
+        // No active signal — open one if consensus reached
+        if (domCount >= CONSENSUS_MIN) {
+          const entry = avgEntry(counts.entries);
+          const lev   = medianLev(counts.levs);
+          const posted = await tg("sendMessage", {
+            chat_id: CHANNEL_ID,
+            text: renderSignal(coin, dominant, entry, lev, domCount),
+            parse_mode: "HTML",
+          });
+          state.signals[coin] = {
+            side: dominant, entry, lev,
+            messageId: posted && posted.ok ? posted.result.message_id : null,
+            whaleCount: domCount,
+          };
+          console.log(`Signal opened: ${dominant} ${coin} (${domCount} whales)`);
+        }
+      } else {
+        const opposite = activeSig.side === "LONG" ? "SHORT" : "LONG";
+        const oppCount = counts[opposite] || 0;
+        const sameCount = counts[activeSig.side] || 0;
+
+        if (sameCount === 0 && oppCount === 0) {
+          // All whales exited — close signal
+          await closeSignal(coin, activeSig, null);
+        } else if (oppCount >= CONSENSUS_MIN && oppCount > sameCount) {
+          // Consensus flipped — close and open opposite
+          await closeSignal(coin, activeSig, avgEntry(counts.entries));
+          const entry = avgEntry(counts.entries);
+          const lev   = medianLev(counts.levs);
+          const posted = await tg("sendMessage", {
+            chat_id: CHANNEL_ID,
+            text: renderSignal(coin, opposite, entry, lev, oppCount),
+            parse_mode: "HTML",
+          });
+          state.signals[coin] = {
+            side: opposite, entry, lev,
+            messageId: posted && posted.ok ? posted.result.message_id : null,
+            whaleCount: oppCount,
+          };
+          console.log(`Signal flipped: ${opposite} ${coin} (${oppCount} whales)`);
+        }
+        // otherwise keep signal open — minor fluctuations are ignored
+      }
+    }
+
+    saveState();
+  } catch (e) {
+    console.error("poll error:", e.message);
+  }
+
+  setTimeout(poll, POLL_INTERVAL);
+}
+
+async function closeSignal(coin, sig, exitPrice) {
+  const text = renderClose(coin, sig.side, sig.entry, exitPrice);
+  if (sig.messageId) {
     await tg("sendMessage", {
       chat_id: CHANNEL_ID,
-      reply_to_message_id: old.messageId,
+      reply_to_message_id: sig.messageId,
       text,
       parse_mode: "HTML",
     });
   } else {
     await tg("sendMessage", { chat_id: CHANNEL_ID, text, parse_mode: "HTML" });
   }
-}
-
-// ---------- poll loop ----------
-async function poll() {
-  try {
-    const traders = await fetchTopTraders();
-    if (traders.length === 0) {
-      setTimeout(poll, POLL_INTERVAL);
-      return;
-    }
-
-    state.traders = traders;
-
-    for (const address of traders) {
-      await checkTrader(address);
-      await new Promise(r => setTimeout(r, 500)); // avoid hammering the API
-    }
-  } catch (e) {
-    console.error("poll error:", e.message);
-  }
-  setTimeout(poll, POLL_INTERVAL);
+  delete state.signals[coin];
+  console.log(`Signal closed: ${sig.side} ${coin}`);
 }
 
 (async () => {
   await loadState();
-  console.log(`Copy machine online. Poll: ${POLL_INTERVAL}ms, Top N: ${TOP_N}`);
-  if (MANUAL_TRADERS.length > 0) console.log("Monitoring:", MANUAL_TRADERS.join(", "));
+  console.log(`Copy machine v2 online. Watching ${TRADERS.length} wallets. Consensus: ${CONSENSUS_MIN}+`);
   poll();
 })();
