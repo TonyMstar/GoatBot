@@ -84,13 +84,16 @@ function jsonbin(method, path, body) {
 // ---------- state ----------
 // positions: { [addr]: { [coin]: { side, entry, valueUsd } } }
 // signals:   { [coin]: { side, entry, lev, messageId, whaleCount } }
-let state = { positions: {}, signals: {} };
+const SIGNAL_COOLDOWN_MS = 20 * 60 * 1000; // 20 min cooldown after SL hit
+
+let state = { positions: {}, signals: {}, cooldowns: {} };
 
 async function loadState() {
   const r = await jsonbin("GET", `/v3/b/${JSONBIN_BIN_ID}/latest`);
   if (r && r.record) state = r.record;
   state.positions = state.positions || {};
   state.signals   = state.signals   || {};
+  state.cooldowns = state.cooldowns || {};
 }
 
 let saveTimer = null;
@@ -216,6 +219,7 @@ async function checkTpSl(mids) {
           text: `🛑 <b>SL HIT</b> — $${coin} ${sig.side}\n${move.toFixed(2)}% — risk managed, on to the next.`,
           parse_mode: "HTML",
         });
+        state.cooldowns[coin] = Date.now(); // block reopening for 20 min
         await closeSignal(coin, sig, price);
         console.log(`SL hit: ${sig.side} ${coin} @ ${price}`);
       }
@@ -269,7 +273,9 @@ async function poll() {
       const activeSig = state.signals[coin];
 
       if (!activeSig) {
-        // No active signal — open one if consensus reached
+        // No active signal — open one if consensus reached and not in cooldown
+        const cooldown = state.cooldowns[coin];
+        if (cooldown && Date.now() - cooldown < SIGNAL_COOLDOWN_MS) continue;
         if (domCount >= CONSENSUS_MIN) {
           const entry = avgEntry(counts.entries);
           const lev   = medianLev(counts.levs);
