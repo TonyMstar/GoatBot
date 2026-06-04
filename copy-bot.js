@@ -86,14 +86,15 @@ function jsonbin(method, path, body) {
 // signals:   { [coin]: { side, entry, lev, messageId, whaleCount } }
 const SIGNAL_COOLDOWN_MS = 20 * 60 * 1000; // 20 min cooldown after SL hit
 
-let state = { positions: {}, signals: {}, cooldowns: {} };
+let state = { positions: {}, signals: {}, cooldowns: {}, lastPositions: {} };
 
 async function loadState() {
   const r = await jsonbin("GET", `/v3/b/${JSONBIN_BIN_ID}/latest`);
   if (r && r.record) state = r.record;
-  state.positions = state.positions || {};
-  state.signals   = state.signals   || {};
-  state.cooldowns = state.cooldowns || {};
+  state.positions     = state.positions     || {};
+  state.signals       = state.signals       || {};
+  state.cooldowns     = state.cooldowns     || {};
+  state.lastPositions = state.lastPositions || {};
 }
 
 let saveTimer = null;
@@ -260,7 +261,17 @@ async function poll() {
     // 2. Build consensus map
     const consensus = buildConsensus();
 
-    // 3. Check each coin for signal open/close
+    // 3. Find coins where at least one trader JUST opened a new position
+    const newCoins = new Set();
+    for (const addr of TRADERS) {
+      const current = state.positions[addr] || {};
+      const last    = state.lastPositions[addr] || {};
+      for (const coin of Object.keys(current)) {
+        if (!last[coin]) newCoins.add(coin); // coin wasn't there last poll
+      }
+    }
+
+    // 4. Check each coin for signal open/close
     const allCoins = new Set([
       ...Object.keys(consensus),
       ...Object.keys(state.signals),
@@ -273,7 +284,8 @@ async function poll() {
       const activeSig = state.signals[coin];
 
       if (!activeSig) {
-        // No active signal — open one if consensus reached and not in cooldown
+        // Only open a signal if this is a genuinely new position
+        if (!newCoins.has(coin)) continue;
         const cooldown = state.cooldowns[coin];
         if (cooldown && Date.now() - cooldown < SIGNAL_COOLDOWN_MS) continue;
         if (domCount >= CONSENSUS_MIN) {
@@ -322,9 +334,17 @@ async function poll() {
       }
     }
 
-    // 4. Check TP/SL levels against live prices
+    // 5. Check TP/SL levels against live prices
     const mids = await getMids();
     if (mids) await checkTpSl(mids);
+
+    // 6. Snapshot current positions so next poll knows what's already open
+    for (const addr of TRADERS) {
+      state.lastPositions[addr] = {};
+      for (const [coin, pos] of Object.entries(state.positions[addr] || {})) {
+        state.lastPositions[addr][coin] = pos.entry;
+      }
+    }
 
     saveState();
   } catch (e) {
