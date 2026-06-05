@@ -220,7 +220,7 @@ async function checkTpSl(mids) {
           parse_mode: "HTML",
         });
         state.cooldowns[coin] = Date.now(); // block reopening for 20 min
-        await closeSignal(coin, sig, price);
+        delete state.signals[coin]; // remove signal without sending a second "closed" message
         console.log(`SL hit: ${sig.side} ${coin} @ ${price}`);
       }
     }
@@ -266,7 +266,8 @@ async function poll() {
       const current = state.positions[addr] || {};
       const last    = state.lastPositions[addr] || {};
       for (const coin of Object.keys(current)) {
-        if (!last[coin]) newCoins.add(coin); // coin wasn't there last poll
+        // only flag as new if not in last positions AND no active signal already exists
+        if (!last[coin] && !state.signals[coin]) newCoins.add(coin);
       }
     }
 
