@@ -24,7 +24,7 @@ const JSONBIN_KEY    = process.env.JSONBIN_KEY;
 const JSONBIN_BIN_ID = process.env.JSONBIN_BIN_ID;
 const POLL_INTERVAL  = parseInt(process.env.POLL_INTERVAL    || "60000");
 const CONSENSUS_MIN  = parseInt(process.env.CONSENSUS_MIN    || "1");
-const MIN_POS_USD    = parseFloat(process.env.MIN_POSITION_USD || "100000");
+const MIN_POS_USD    = parseFloat(process.env.MIN_POSITION_USD || "1000");
 const TRADERS        = (process.env.TRADER_ADDRESSES || "").split(",").map(s => s.trim()).filter(Boolean);
 
 const SL_PCT  = 0.02;
