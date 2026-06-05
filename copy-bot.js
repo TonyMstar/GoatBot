@@ -87,6 +87,7 @@ function jsonbin(method, path, body) {
 const SIGNAL_COOLDOWN_MS = 20 * 60 * 1000; // 20 min cooldown after SL hit
 
 let state = { positions: {}, signals: {}, cooldowns: {}, lastPositions: {} };
+let warmupDone = false; // first poll snapshots positions silently, no signals fired
 
 async function loadState() {
   const r = await jsonbin("GET", `/v3/b/${JSONBIN_BIN_ID}/latest`);
@@ -95,6 +96,16 @@ async function loadState() {
   state.signals       = state.signals       || {};
   state.cooldowns     = state.cooldowns     || {};
   state.lastPositions = state.lastPositions || {};
+
+  // Discard any signals older than 24 hours — they are stale from a previous run
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  for (const coin of Object.keys(state.signals)) {
+    const sig = state.signals[coin];
+    if (!sig.openedAt || sig.openedAt < cutoff) {
+      console.log(`Discarding stale signal: ${sig.side} ${coin} (no timestamp or >24h old)`);
+      delete state.signals[coin];
+    }
+  }
 }
 
 let saveTimer = null;
@@ -260,6 +271,22 @@ async function poll() {
     // 2. Build consensus map
     const consensus = buildConsensus();
 
+    // On first poll after startup: snapshot positions silently so existing
+    // positions (opened days/weeks ago) are never treated as new signals.
+    if (!warmupDone) {
+      for (const addr of TRADERS) {
+        state.lastPositions[addr] = {};
+        for (const [coin, pos] of Object.entries(state.positions[addr] || {})) {
+          state.lastPositions[addr][coin] = pos.entry;
+        }
+      }
+      warmupDone = true;
+      saveState();
+      console.log("Warmup complete — existing positions snapshotted, now watching for new entries.");
+      setTimeout(poll, POLL_INTERVAL);
+      return;
+    }
+
     // 3. Find coins where at least one trader JUST opened a new position
     const newCoins = new Set();
     for (const addr of TRADERS) {
@@ -301,6 +328,7 @@ async function poll() {
             messageId: posted && posted.ok ? posted.result.message_id : null,
             whaleCount: domCount,
             hits: [],
+            openedAt: Date.now(),
           };
           console.log(`Signal opened: ${dominant} ${coin} (${domCount} whales)`);
         }
