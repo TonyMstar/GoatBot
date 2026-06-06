@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -v -X POST https://api.hyperliquid.xyz/info -H 'Content-Type: application/json' -d '{\"type\":\"leaderboard\"}')",
+      "Bash(python3)",
+      "WebFetch(domain:stats-data.hyperliquid.xyz)",
+      "WebFetch(domain:api.hyperliquid.xyz)",
+      "WebFetch(domain:blave.org)"
+    ]
+  }
+}
