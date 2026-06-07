@@ -97,12 +97,19 @@ async function loadState() {
   state.cooldowns     = state.cooldowns     || {};
   state.lastPositions = state.lastPositions || {};
 
-  // Discard any signals older than 24 hours — they are stale from a previous run
+  // Discard stale signals on startup
   const cutoff = Date.now() - 24 * 60 * 60 * 1000;
   for (const coin of Object.keys(state.signals)) {
     const sig = state.signals[coin];
+    // Discard if older than 24h or no timestamp
     if (!sig.openedAt || sig.openedAt < cutoff) {
-      console.log(`Discarding stale signal: ${sig.side} ${coin} (no timestamp or >24h old)`);
+      console.log(`Discarding stale signal: ${sig.side} ${coin} (>24h old)`);
+      delete state.signals[coin];
+      continue;
+    }
+    // Discard if all TPs already hit — avoids re-firing them on restart
+    if (sig.hits && sig.hits.length >= 3) {
+      console.log(`Discarding completed signal: ${sig.side} ${coin} (all TPs already hit)`);
       delete state.signals[coin];
     }
   }
