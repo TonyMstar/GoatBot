@@ -294,7 +294,10 @@ async function poll() {
       return;
     }
 
-    // 3. Find coins where at least one trader JUST opened a new position
+    // 3. Fetch live prices early — needed for staleness check before posting
+    const mids = await getMids();
+
+    // 4. Find coins where at least one trader JUST opened a new position
     const newCoins = new Set();
     for (const addr of TRADERS) {
       const current = state.positions[addr] || {};
@@ -305,7 +308,7 @@ async function poll() {
       }
     }
 
-    // 4. Check each coin for signal open/close
+    // 5. Check each coin for signal open/close
     const allCoins = new Set([
       ...Object.keys(consensus),
       ...Object.keys(state.signals),
@@ -325,6 +328,21 @@ async function poll() {
         if (domCount >= CONSENSUS_MIN) {
           const entry = avgEntry(counts.entries);
           const lev   = medianLev(counts.levs);
+
+          // Skip stale entries — if price has already moved >2% from entry
+          // in either direction, the trade is too old to signal (SL already hit
+          // or TP1 already passed before subscribers can enter)
+          if (mids) {
+            const currentPrice = parseFloat(mids[coin]);
+            if (currentPrice) {
+              const drift = Math.abs(currentPrice - entry) / entry;
+              if (drift > SL_PCT) {
+                console.log(`Skip ${coin}: entry too stale (${(drift*100).toFixed(1)}% drift from current ${currentPrice})`);
+                continue;
+              }
+            }
+          }
+
           const posted = await tg("sendMessage", {
             chat_id: CHANNEL_ID,
             text: renderSignal(coin, dominant, entry, lev, domCount),
@@ -338,6 +356,8 @@ async function poll() {
             openedAt: Date.now(),
           };
           state.cooldowns[coin] = Date.now(); // prevent re-posting same signal after restart
+          // Save immediately (not debounced) so cooldown survives a crash/redeploy
+          await jsonbin("PUT", `/v3/b/${JSONBIN_BIN_ID}`, state);
           console.log(`Signal opened: ${dominant} ${coin} (${domCount} whales)`);
         }
       } else {
@@ -370,11 +390,10 @@ async function poll() {
       }
     }
 
-    // 5. Check TP/SL levels against live prices
-    const mids = await getMids();
+    // 6. Check TP/SL levels against live prices (mids fetched above)
     if (mids) await checkTpSl(mids);
 
-    // 6. Snapshot current positions so next poll knows what's already open
+    // 7. Snapshot current positions so next poll knows what's already open
     for (const addr of TRADERS) {
       state.lastPositions[addr] = {};
       for (const [coin, pos] of Object.entries(state.positions[addr] || {})) {
