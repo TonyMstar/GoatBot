@@ -290,8 +290,7 @@ async function poll() {
       warmupDone = true;
       saveState();
       console.log("Warmup complete — existing positions snapshotted, now watching for new entries.");
-      setTimeout(poll, POLL_INTERVAL);
-      return;
+      return; // outer setTimeout at end of function handles next poll
     }
 
     // 3. Fetch live prices early — needed for staleness check before posting
