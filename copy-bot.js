@@ -264,6 +264,9 @@ async function poll() {
         const valueUsd = parseFloat(pos.positionValue || "0");
         if (valueUsd < MIN_POS_USD) continue; // ignore small positions
 
+        // Skip prediction markets (e.g. xyz:SPCX, @107) — not tradeable on most exchanges
+        if (pos.coin.startsWith("xyz:") || pos.coin.startsWith("@")) continue;
+
         coinMap[pos.coin] = {
           side:     size > 0 ? "LONG" : "SHORT",
           entry:    parseFloat(pos.entryPx),
