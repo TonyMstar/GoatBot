@@ -337,6 +337,7 @@ async function poll() {
             hits: [],
             openedAt: Date.now(),
           };
+          state.cooldowns[coin] = Date.now(); // prevent re-posting same signal after restart
           console.log(`Signal opened: ${dominant} ${coin} (${domCount} whales)`);
         }
       } else {
