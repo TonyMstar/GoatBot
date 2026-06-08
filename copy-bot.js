@@ -81,6 +81,20 @@ function jsonbin(method, path, body) {
   return request({ hostname: "api.jsonbin.io", path, method, headers }, payload);
 }
 
+function hlStatsGet(path) {
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: "stats-data.hyperliquid.xyz", path, method: "GET",
+      headers: { "Content-Type": "application/json" },
+    }, (res) => {
+      let b = ""; res.on("data", c => b += c);
+      res.on("end", () => { try { resolve(JSON.parse(b)); } catch { resolve(null); } });
+    });
+    req.on("error", () => resolve(null));
+    req.end();
+  });
+}
+
 // ---------- state ----------
 // positions: { [addr]: { [coin]: { side, entry, valueUsd } } }
 // signals:   { [coin]: { side, entry, lev, messageId, whaleCount } }
@@ -411,6 +425,114 @@ async function poll() {
   setTimeout(poll, POLL_INTERVAL);
 }
 
+// ---------- weekly scanner ----------
+const SCAN_MIN_WIN_RATE    = 65;
+const SCAN_MAX_WIN_RATE    = 98;
+const SCAN_MAX_TRADES_30D  = 1000;
+const SCAN_MIN_TRADES_30D  = 10;
+const SCAN_MIN_PNL_30D     = 5000;
+const SCAN_MIN_ACTIVE_DAYS = 10;
+const SCAN_MAX_OPEN_POS    = 10; // skip market makers with too many open positions
+const SCAN_TOP_N           = 200;
+
+async function scanLeaderboard() {
+  const data = await hlStatsGet("/Mainnet/leaderboard");
+  if (!data || !Array.isArray(data.leaderboardRows)) return [];
+  const rows = data.leaderboardRows;
+  const seen = new Set();
+  const addrs = [];
+  for (const window of ["day", "week", "month", "allTime"]) {
+    const sorted = rows
+      .filter(r => { const w = r.windowPerformances.find(p => p[0] === window); return w && parseFloat(w[1].pnl) > 0; })
+      .sort((a, b) => {
+        const pa = parseFloat(a.windowPerformances.find(p => p[0] === window)[1].pnl);
+        const pb = parseFloat(b.windowPerformances.find(p => p[0] === window)[1].pnl);
+        return pb - pa;
+      })
+      .slice(0, SCAN_TOP_N);
+    for (const r of sorted) {
+      if (!seen.has(r.ethAddress)) { seen.add(r.ethAddress); addrs.push(r.ethAddress); }
+    }
+  }
+  return addrs;
+}
+
+async function analyzeTraderForScan(address) {
+  const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  let fills = await hl({ type: "userFillsByTime", user: address, startTime: thirtyDaysAgo, endTime: Date.now() });
+  if (!fills || !Array.isArray(fills) || fills.length === 0)
+    fills = await hl({ type: "userFills", user: address });
+  if (!fills || !Array.isArray(fills)) return null;
+  fills = fills.filter(f => f.time >= thirtyDaysAgo);
+  const closed = fills.filter(f => f.closedPnl !== undefined && parseFloat(f.closedPnl) !== 0);
+  const wins   = closed.filter(f => parseFloat(f.closedPnl) > 0);
+  const totalPnl = closed.reduce((sum, f) => sum + parseFloat(f.closedPnl), 0);
+  const winRate  = closed.length > 0 ? (wins.length / closed.length) * 100 : 0;
+  const activeDays = new Set(fills.map(f => new Date(f.time).toISOString().slice(0, 10))).size;
+
+  if (closed.length < SCAN_MIN_TRADES_30D || closed.length > SCAN_MAX_TRADES_30D) return null;
+  if (winRate < SCAN_MIN_WIN_RATE || winRate > SCAN_MAX_WIN_RATE) return null;
+  if (totalPnl < SCAN_MIN_PNL_30D) return null;
+  if (activeDays < SCAN_MIN_ACTIVE_DAYS) return null;
+
+  const cs = await hl({ type: "clearinghouseState", user: address });
+  const openCount = cs && cs.assetPositions
+    ? cs.assetPositions.filter(ap => Math.abs(parseFloat(ap.position?.szi || "0")) > 1e-8).length
+    : 0;
+  if (openCount > SCAN_MAX_OPEN_POS) return null; // market maker
+
+  return { address, winRate, totalPnl, trades: closed.length };
+}
+
+async function runWeeklyScanner() {
+  console.log("Weekly scanner starting...");
+  const addresses = await scanLeaderboard();
+  if (!addresses.length) { console.log("Scanner: leaderboard fetch failed"); return; }
+
+  const qualified = [];
+  for (const addr of addresses) {
+    const result = await analyzeTraderForScan(addr);
+    if (result) qualified.push(result);
+    await new Promise(r => setTimeout(r, 400));
+  }
+
+  qualified.sort((a, b) => b.winRate - a.winRate);
+  const top = qualified.slice(0, 8);
+  if (!top.length) { console.log("Scanner: no qualified traders found"); return; }
+
+  // Update in-memory TRADERS list and persist to JSONBin
+  TRADERS.length = 0;
+  TRADERS.push(...top.map(t => t.address));
+  state.savedTraders = [...TRADERS];
+  await jsonbin("PUT", `/v3/b/${JSONBIN_BIN_ID}`, state);
+
+  const lines = [
+    "📊 <b>Weekly Trader Scan Complete</b>",
+    `Updated to ${top.length} top traders (65%+ win rate):`,
+    "",
+    ...top.map((t, i) => `${i + 1}. <code>${t.address.slice(0, 12)}...</code> — ${t.winRate.toFixed(1)}% WR | $${Number(Math.round(t.totalPnl)).toLocaleString()} PnL`),
+    "",
+    "🔐 Goat Verified | Auto-updated",
+  ];
+  await tg("sendMessage", { chat_id: CHANNEL_ID, text: lines.join("\n"), parse_mode: "HTML" });
+  console.log(`Scanner done: ${top.length} traders loaded.`);
+}
+
+function scheduleWeeklyScanner() {
+  const now = new Date();
+  const next = new Date(now);
+  // Schedule for next Monday 09:00 UTC
+  const daysUntilMonday = ((8 - now.getUTCDay()) % 7) || 7;
+  next.setUTCDate(now.getUTCDate() + daysUntilMonday);
+  next.setUTCHours(9, 0, 0, 0);
+  const ms = next - now;
+  console.log(`Next trader scan: ${next.toUTCString()} (in ${Math.round(ms / 3600000)}h)`);
+  setTimeout(async () => {
+    await runWeeklyScanner();
+    scheduleWeeklyScanner(); // reschedule for the following Monday
+  }, ms);
+}
+
 async function closeSignal(coin, sig, exitPrice) {
   const text = renderClose(coin, sig.side, sig.entry, exitPrice);
   if (sig.messageId) {
@@ -429,6 +551,13 @@ async function closeSignal(coin, sig, exitPrice) {
 
 (async () => {
   await loadState();
+  // Use saved traders from JSONBin if available (set by weekly scanner)
+  if (state.savedTraders && state.savedTraders.length > 0) {
+    TRADERS.length = 0;
+    TRADERS.push(...state.savedTraders);
+    console.log(`Loaded ${TRADERS.length} traders from saved scan.`);
+  }
   console.log(`Copy machine v2 online. Watching ${TRADERS.length} wallets. Consensus: ${CONSENSUS_MIN}+`);
+  scheduleWeeklyScanner();
   poll();
 })();
