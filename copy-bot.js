@@ -505,17 +505,7 @@ async function runWeeklyScanner() {
   TRADERS.push(...top.map(t => t.address));
   state.savedTraders = [...TRADERS];
   await jsonbin("PUT", `/v3/b/${JSONBIN_BIN_ID}`, state);
-
-  const lines = [
-    "📊 <b>Weekly Trader Scan Complete</b>",
-    `Updated to ${top.length} top traders (65%+ win rate):`,
-    "",
-    ...top.map((t, i) => `${i + 1}. <code>${t.address.slice(0, 12)}...</code> — ${t.winRate.toFixed(1)}% WR | $${Number(Math.round(t.totalPnl)).toLocaleString()} PnL`),
-    "",
-    "🔐 Goat Verified | Auto-updated",
-  ];
-  await tg("sendMessage", { chat_id: CHANNEL_ID, text: lines.join("\n"), parse_mode: "HTML" });
-  console.log(`Scanner done: ${top.length} traders loaded.`);
+  console.log(`Scanner done: ${top.length} traders loaded — ${top.map(t => t.address.slice(0,10)).join(", ")}`);
 }
 
 function scheduleWeeklyScanner() {
