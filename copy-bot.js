@@ -278,8 +278,8 @@ async function poll() {
         const valueUsd = parseFloat(pos.positionValue || "0");
         if (valueUsd < MIN_POS_USD) continue; // ignore small positions
 
-        // Skip prediction markets (e.g. xyz:SPCX, @107) — not tradeable on most exchanges
-        if (pos.coin.startsWith("xyz:") || pos.coin.startsWith("@")) continue;
+        // Skip prediction markets (xyz:SPCX, @107, vntl:ANTHROPIC) — not tradeable on most exchanges
+        if (pos.coin.startsWith("xyz:") || pos.coin.startsWith("@") || pos.coin.startsWith("vntl:")) continue;
 
         coinMap[pos.coin] = {
           side:     size > 0 ? "LONG" : "SHORT",
