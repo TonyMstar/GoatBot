@@ -295,23 +295,31 @@ async function poll() {
     // 2. Build consensus map
     const consensus = buildConsensus();
 
-    // On first poll after startup: snapshot positions silently so existing
-    // positions (opened days/weeks ago) are never treated as new signals.
+    // 3. Fetch live prices early — needed for warmup staleness check and signal posting
+    const mids = await getMids();
+
+    // On first poll after startup: only suppress positions that are already too
+    // stale to signal (>2% from entry). Fresh positions are left out so they get
+    // detected as new next poll and go through the normal signal path.
     if (!warmupDone) {
       for (const addr of TRADERS) {
         state.lastPositions[addr] = {};
         for (const [coin, pos] of Object.entries(state.positions[addr] || {})) {
-          state.lastPositions[addr][coin] = pos.entry;
+          const currentPrice = mids ? parseFloat(mids[coin]) : null;
+          const drift = currentPrice ? Math.abs(currentPrice - pos.entry) / pos.entry : 1;
+          if (drift > SL_PCT) {
+            // Too stale — suppress silently
+            state.lastPositions[addr][coin] = pos.entry;
+            console.log(`Warmup suppressed stale ${pos.side} ${coin} (${(drift*100).toFixed(1)}% drift)`);
+          }
+          // Fresh positions left out → detected as new next poll → normal signal flow
         }
       }
       warmupDone = true;
       saveState();
-      console.log("Warmup complete — existing positions snapshotted, now watching for new entries.");
+      console.log("Warmup complete.");
       return; // outer setTimeout at end of function handles next poll
     }
-
-    // 3. Fetch live prices early — needed for staleness check before posting
-    const mids = await getMids();
 
     // 4. Find coins where at least one trader JUST opened a new position
     const newCoins = new Set();
