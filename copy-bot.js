@@ -483,6 +483,11 @@ async function analyzeTraderForScan(address) {
   if (totalPnl < SCAN_MIN_PNL_30D) return null;
   if (activeDays < SCAN_MIN_ACTIVE_DAYS) return null;
 
+  // Reject prediction market heavy traders (xyz:, @, vntl:)
+  const predFills = fills.filter(f => f.coin.startsWith("xyz:") || f.coin.startsWith("@") || f.coin.startsWith("vntl:")).length;
+  const predPct   = fills.length > 0 ? predFills / fills.length : 0;
+  if (predPct > 0.20) return null;
+
   const cs = await hl({ type: "clearinghouseState", user: address });
   const openCount = cs && cs.assetPositions
     ? cs.assetPositions.filter(ap => Math.abs(parseFloat(ap.position?.szi || "0")) > 1e-8).length

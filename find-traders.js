@@ -12,7 +12,12 @@ const MAX_TRADES_30D     = 1000; // above this = likely bot/market maker
 const MIN_TRADES_30D     = 10;   // below this = not enough data
 const MIN_PNL_30D        = 5000; // minimum $5k profit in 30 days
 const MIN_ACTIVE_DAYS    = 10;   // must trade on at least 10 distinct days in 30
+const MAX_PRED_MARKET_PCT = 20;  // reject if >20% of fills are prediction markets
 const TOP_N              = 200;  // how many leaderboard traders to scan
+
+function isPredMarket(coin) {
+  return coin.startsWith("xyz:") || coin.startsWith("@") || coin.startsWith("vntl:");
+}
 
 const THIRTY_DAYS_AGO = Date.now() - 30 * 24 * 60 * 60 * 1000;
 
@@ -127,7 +132,11 @@ async function analyzeTrader(address) {
   const greenDays  = Object.values(dayMap).filter(pnl => pnl > 0).length;
   const profitableDayRate = activeDays > 0 ? greenDays / activeDays : 0;
 
-  process.stdout.write(`(fills:${fills.length} closed:${closed.length} wr:${winRate.toFixed(0)}% pnl:$${totalPnl.toFixed(0)} days:${activeDays} green:${greenDays}) `);
+  // Reject prediction market heavy traders
+  const predFills = fills.filter(f => isPredMarket(f.coin)).length;
+  const predPct   = fills.length > 0 ? (predFills / fills.length) * 100 : 0;
+
+  process.stdout.write(`(fills:${fills.length} closed:${closed.length} wr:${winRate.toFixed(0)}% pnl:$${totalPnl.toFixed(0)} days:${activeDays} green:${greenDays} pred:${predPct.toFixed(0)}%) `);
 
   if (closed.length < MIN_TRADES_30D) return null;
   if (closed.length > MAX_TRADES_30D) return null;
@@ -135,6 +144,7 @@ async function analyzeTrader(address) {
   if (winRate > MAX_WIN_RATE)  return null;
   if (totalPnl < MIN_PNL_30D) return null;
   if (activeDays < MIN_ACTIVE_DAYS) return null;
+  if (predPct > MAX_PRED_MARKET_PCT) return null; // mostly prediction markets
 
   // Check if they have current open positions (active directional trader)
   const state = await post("api.hyperliquid.xyz", "/info", { type: "clearinghouseState", user: address });
