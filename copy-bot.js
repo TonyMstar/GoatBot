@@ -554,8 +554,12 @@ async function closeSignal(coin, sig, exitPrice) {
 
 (async () => {
   await loadState();
-  // Use saved traders from JSONBin if available (set by weekly scanner)
-  if (state.savedTraders && state.savedTraders.length > 0) {
+  if (TRADERS.length > 0) {
+    // Railway env var is set — it takes priority. Sync to JSONBin so next restart is consistent.
+    state.savedTraders = [...TRADERS];
+    console.log(`Loaded ${TRADERS.length} traders from TRADER_ADDRESSES env var.`);
+  } else if (state.savedTraders && state.savedTraders.length > 0) {
+    // No env var set — fall back to last weekly scanner result
     TRADERS.length = 0;
     TRADERS.push(...state.savedTraders);
     console.log(`Loaded ${TRADERS.length} traders from saved scan.`);
