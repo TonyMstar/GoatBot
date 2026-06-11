@@ -176,14 +176,14 @@ function renderClose(coin, side, entry, exitPrice) {
 
 // ---------- consensus ----------
 function buildConsensus() {
-  // consensus[coin] = { LONG: count, SHORT: count, levSum: number, entries: [] }
   const consensus = {};
   for (const [, coinMap] of Object.entries(state.positions)) {
     for (const [coin, pos] of Object.entries(coinMap)) {
-      if (!consensus[coin]) consensus[coin] = { LONG: 0, SHORT: 0, levs: [], entries: [] };
+      if (!consensus[coin]) consensus[coin] = { LONG: 0, SHORT: 0, levs: [], longEntries: [], shortEntries: [] };
       consensus[coin][pos.side]++;
-      if (pos.lev)   consensus[coin].levs.push(pos.lev);
-      consensus[coin].entries.push(pos.entry);
+      if (pos.lev) consensus[coin].levs.push(pos.lev);
+      if (pos.side === "LONG") consensus[coin].longEntries.push(pos.entry);
+      else consensus[coin].shortEntries.push(pos.entry);
     }
   }
   return consensus;
@@ -339,7 +339,7 @@ async function poll() {
     ]);
 
     for (const coin of allCoins) {
-      const counts    = consensus[coin] || { LONG: 0, SHORT: 0, levs: [], entries: [] };
+      const counts    = consensus[coin] || { LONG: 0, SHORT: 0, levs: [], longEntries: [], shortEntries: [] };
       const dominant  = counts.LONG >= counts.SHORT ? "LONG" : "SHORT";
       const domCount  = counts[dominant];
       const activeSig = state.signals[coin];
@@ -350,20 +350,23 @@ async function poll() {
         const cooldown = state.cooldowns[coin];
         if (cooldown && Date.now() - cooldown < SIGNAL_COOLDOWN_MS) continue;
         if (domCount >= CONSENSUS_MIN) {
-          const entry = avgEntry(counts.entries);
           const lev   = medianLev(counts.levs);
 
-          // Skip stale entries — if price has already moved >2% from entry
-          // in either direction, the trade is too old to signal (SL already hit
-          // or TP1 already passed before subscribers can enter)
+          // Only use dominant-side entries for staleness check and avg entry
+          // (mixing LONG + SHORT entries skews the average and causes false staleness rejects)
+          const domEntries = dominant === "LONG" ? counts.longEntries : counts.shortEntries;
+
+          // Skip if NO dominant-side trader has a fresh entry within SL_PCT of current price
+          let entry = avgEntry(domEntries);
           if (mids) {
             const currentPrice = parseFloat(mids[coin]);
             if (currentPrice) {
-              const drift = Math.abs(currentPrice - entry) / entry;
-              if (drift > SL_PCT) {
-                console.log(`Skip ${coin}: entry too stale (${(drift*100).toFixed(1)}% drift from current ${currentPrice})`);
+              const freshEntries = domEntries.filter(e => Math.abs(currentPrice - e) / e <= SL_PCT);
+              if (freshEntries.length === 0) {
+                console.log(`Skip ${coin}: no fresh ${dominant} entries within ${(SL_PCT*100).toFixed(0)}% of current ${currentPrice}`);
                 continue;
               }
+              entry = avgEntry(freshEntries);
             }
           }
 
@@ -394,8 +397,9 @@ async function poll() {
           await closeSignal(coin, activeSig, null);
         } else if (oppCount >= CONSENSUS_MIN && oppCount > sameCount) {
           // Consensus flipped — close and open opposite
-          await closeSignal(coin, activeSig, avgEntry(counts.entries));
-          const entry = avgEntry(counts.entries);
+          const oppEntries = opposite === "LONG" ? counts.longEntries : counts.shortEntries;
+          await closeSignal(coin, activeSig, avgEntry(oppEntries));
+          const entry = avgEntry(oppEntries);
           const lev   = medianLev(counts.levs);
           const posted = await tg("sendMessage", {
             chat_id: CHANNEL_ID,
@@ -556,7 +560,15 @@ async function closeSignal(coin, sig, exitPrice) {
   await loadState();
   if (TRADERS.length > 0) {
     // Railway env var is set — it takes priority. Sync to JSONBin so next restart is consistent.
+    const prevList = (state.traderList || []).slice().sort().join(",");
+    const currList = [...TRADERS].sort().join(",");
+    if (prevList !== currList) {
+      console.log(`Trader list changed — clearing old signals and cooldowns`);
+      state.signals  = {};
+      state.cooldowns = {};
+    }
     state.savedTraders = [...TRADERS];
+    state.traderList   = [...TRADERS];
     console.log(`Loaded ${TRADERS.length} traders from TRADER_ADDRESSES env var.`);
   } else if (state.savedTraders && state.savedTraders.length > 0) {
     // No env var set — fall back to last weekly scanner result
