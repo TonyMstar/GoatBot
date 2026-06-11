@@ -411,7 +411,9 @@ async function poll() {
             messageId: posted && posted.ok ? posted.result.message_id : null,
             whaleCount: oppCount,
             hits: [],
+            openedAt: Date.now(),
           };
+          await jsonbin("PUT", `/v3/b/${JSONBIN_BIN_ID}`, state);
           console.log(`Signal flipped: ${opposite} ${coin} (${oppCount} whales)`);
         }
         // otherwise keep signal open — minor fluctuations are ignored
