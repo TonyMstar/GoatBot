@@ -375,15 +375,18 @@ async function poll() {
             text: renderSignal(coin, dominant, entry, lev, domCount),
             parse_mode: "HTML",
           });
+          if (!posted || !posted.ok) {
+            console.error(`Telegram FAILED ${dominant} ${coin} — will retry next poll:`, JSON.stringify(posted));
+            continue; // don't save phantom signal — retry on next poll
+          }
           state.signals[coin] = {
             side: dominant, entry, lev,
-            messageId: posted && posted.ok ? posted.result.message_id : null,
+            messageId: posted.result.message_id,
             whaleCount: domCount,
             hits: [],
             openedAt: Date.now(),
           };
-          state.cooldowns[coin] = Date.now(); // prevent re-posting same signal after restart
-          // Save immediately (not debounced) so cooldown survives a crash/redeploy
+          state.cooldowns[coin] = Date.now();
           await jsonbin("PUT", `/v3/b/${JSONBIN_BIN_ID}`, state);
           console.log(`Signal opened: ${dominant} ${coin} (${domCount} whales)`);
         }
@@ -406,15 +409,19 @@ async function poll() {
             text: renderSignal(coin, opposite, entry, lev, oppCount),
             parse_mode: "HTML",
           });
-          state.signals[coin] = {
-            side: opposite, entry, lev,
-            messageId: posted && posted.ok ? posted.result.message_id : null,
-            whaleCount: oppCount,
-            hits: [],
-            openedAt: Date.now(),
-          };
-          await jsonbin("PUT", `/v3/b/${JSONBIN_BIN_ID}`, state);
-          console.log(`Signal flipped: ${opposite} ${coin} (${oppCount} whales)`);
+          if (!posted || !posted.ok) {
+            console.error(`Telegram FAILED flip ${opposite} ${coin}:`, JSON.stringify(posted));
+          } else {
+            state.signals[coin] = {
+              side: opposite, entry, lev,
+              messageId: posted.result.message_id,
+              whaleCount: oppCount,
+              hits: [],
+              openedAt: Date.now(),
+            };
+            await jsonbin("PUT", `/v3/b/${JSONBIN_BIN_ID}`, state);
+            console.log(`Signal flipped: ${opposite} ${coin} (${oppCount} whales)`);
+          }
         }
         // otherwise keep signal open — minor fluctuations are ignored
       }
